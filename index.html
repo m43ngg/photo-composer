@@ -30,7 +30,13 @@
   main { display: grid; grid-template-columns: 1fr 280px; min-height: 0; }
   #stageWrap { position: relative; display: flex; align-items: center; justify-content: center;
     background: var(--stage); overflow: hidden; padding: 16px; min-height: 0; }
-  #stage { max-width: 100%; max-height: 100%; box-shadow: 0 2px 12px rgba(0,0,0,.25);
+  .zoomCtl { position: absolute; right: 12px; bottom: 12px; z-index: 2; display: flex; gap: 4px; align-items: center;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 4px;
+    box-shadow: 0 2px 8px rgba(0,0,0,.2); }
+  .zoomCtl[hidden] { display: none; }
+  .zoomCtl button { padding: 2px 9px; }
+  #stageZoom { min-width: 48px; text-align: center; font-variant-numeric: tabular-nums; }
+  #stage { position: absolute; box-shadow: 0 2px 12px rgba(0,0,0,.25);
     background: repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 0 0 / 20px 20px;
     touch-action: none; }
   #empty { position: absolute; inset: 16px; display: flex; flex-direction: column; gap: 12px;
@@ -91,6 +97,13 @@
 <main>
   <div id="stageWrap">
     <canvas id="stage" hidden></canvas>
+    <div class="zoomCtl" id="zoomCtl" hidden>
+      <button id="zOut" title="축소 (-)">－</button>
+      <span id="stageZoom">100%</span>
+      <button id="zIn" title="확대 (+)">＋</button>
+      <button id="zFit" title="화면에 맞춤 (0)">맞춤</button>
+      <button id="z100" title="원본 크기">1:1</button>
+    </div>
     <div id="empty">
       <div style="font-size:18px">사진을 여기로 끌어다 놓으세요</div>
       <div>첫 번째 사진은 배경이 되고, 나머지는 위에 붙여집니다.<br>Ctrl+V로 붙여넣기도 됩니다.</div>
@@ -141,7 +154,9 @@
       • 사진을 드래그해서 이동<br>
       • 모서리 □ 를 끌어 크기 조절<br>
       • 위쪽 ○ 를 끌어 회전 (Shift: 15° 단위)<br>
-      • 마우스 휠로 크기 조절<br>
+      • 마우스 휠: 화면 확대/축소 (0 키: 화면 맞춤)<br>
+      • Alt + 휠: 선택한 사진 크기 조절<br>
+      • 빈 곳·스페이스·우클릭 드래그: 화면 이동<br>
       • 방향키로 미세 이동 (Shift: 10px)<br>
       • Delete 키로 삭제<br>
       • 더블클릭하면 자르기 창이 열려요<br>
@@ -214,6 +229,8 @@
     stage.width = img.naturalWidth;
     stage.height = img.naturalHeight;
     stage.hidden = false;
+    $('zoomCtl').hidden = false;
+    view.fit = true; layoutStage();
     empty.style.display = 'none';
     $('btnSave').disabled = $('btnBaseCrop').disabled = $('btnShape').disabled = false;
     render();
@@ -457,8 +474,10 @@
 
   // ---------- pointer interaction ----------
   stage.addEventListener('pointerdown', e => {
+    if (e.button !== 0 || stageSpace) return; // wrap handles panning
     const p = eventPos(e), hit = hitTest(p);
-    if (!hit) { select(null); return; }
+    if (!hit) { select(null); return; }      // empty spot: bubble up → pan
+    e.stopPropagation();
     if (hit.L !== sel) select(hit.L);
     const L = hit.L;
     drag = { type: hit.type, L, start: p, ox: L.x, oy: L.y };
@@ -467,9 +486,10 @@
 
   stage.addEventListener('pointermove', e => {
     const p = eventPos(e);
+    if (pan) return;
     if (!drag) {
-      const hit = hitTest(p);
-      stage.style.cursor = !hit ? 'default' : hit.type === 'move' ? 'move'
+      const hit = stageSpace ? null : hitTest(p);
+      stage.style.cursor = !hit ? 'grab' : hit.type === 'move' ? 'move'
         : hit.type === 'rotate' ? 'grab' : 'nwse-resize';
       return;
     }
@@ -498,12 +518,83 @@
   stage.addEventListener('pointerup', endDrag);
   stage.addEventListener('pointercancel', endDrag);
 
-  stage.addEventListener('wheel', e => {
-    if (!sel) return;
+  // ---------- view zoom / pan ----------
+  const view = { z: 1, x: 0, y: 0, fit: true, fitZ: 1 }; // z = CSS px per image px
+  let pan = null, stageSpace = false;
+
+  function layoutStage() {
+    if (!base) return;
+    const ww = wrap.clientWidth, wh = wrap.clientHeight, pad = 16, W = stage.width, H = stage.height;
+    view.fitZ = Math.max(0.01, Math.min((ww - pad * 2) / W, (wh - pad * 2) / H));
+    if (view.fit) view.z = view.fitZ;
+    view.z = Math.min(Math.max(view.fitZ, 32), Math.max(view.fitZ * 0.5, view.z));
+    const sw = W * view.z, sh = H * view.z;
+    view.x = sw <= ww - pad * 2 ? (ww - sw) / 2 : Math.min(pad, Math.max(ww - sw - pad, view.x));
+    view.y = sh <= wh - pad * 2 ? (wh - sh) / 2 : Math.min(pad, Math.max(wh - sh - pad, view.y));
+    Object.assign(stage.style, { width: sw + 'px', height: sh + 'px', left: view.x + 'px', top: view.y + 'px',
+      imageRendering: view.z * (window.devicePixelRatio || 1) > 3 ? 'pixelated' : 'auto' });
+    $('stageZoom').textContent = Math.round(view.z * 100) + '%';
+  }
+
+  function zoomStage(f, clientX, clientY) {
+    if (!base) return;
+    const b = wrap.getBoundingClientRect();
+    const px = clientX === undefined ? b.width / 2 : clientX - b.left;
+    const py = clientY === undefined ? b.height / 2 : clientY - b.top;
+    const nz = Math.min(Math.max(view.fitZ, 32), Math.max(view.fitZ * 0.5, view.z * f));
+    view.x = px - (px - view.x) * nz / view.z;
+    view.y = py - (py - view.y) * nz / view.z;
+    view.z = nz; view.fit = false;
+    layoutStage(); render();
+  }
+  function fitStage() { view.fit = true; layoutStage(); render(); }
+
+  wrap.addEventListener('wheel', e => {
+    if (!base) return;
     e.preventDefault();
-    scaleLayer(sel, e.deltaY < 0 ? 1.06 : 1 / 1.06);
-    syncProps(); render();
+    if (e.altKey && sel) { // Alt + wheel: resize the selected photo
+      scaleLayer(sel, e.deltaY < 0 ? 1.06 : 1 / 1.06);
+      syncProps(); render();
+      return;
+    }
+    zoomStage(e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX, e.clientY);
   }, { passive: false });
+
+  wrap.addEventListener('pointerdown', e => {
+    if (!base || e.target.closest('.zoomCtl')) return;
+    if (e.button === 0 && e.target !== stage) select(null);
+    pan = { sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y };
+    wrap.setPointerCapture(e.pointerId);
+    stage.style.cursor = wrap.style.cursor = 'grabbing';
+    e.preventDefault();
+  });
+  wrap.addEventListener('pointermove', e => {
+    if (!pan) return;
+    view.x = pan.ox + e.clientX - pan.sx;
+    view.y = pan.oy + e.clientY - pan.sy;
+    view.fit = false;
+    layoutStage();
+  });
+  const endPan = () => { if (pan) { pan = null; stage.style.cursor = wrap.style.cursor = ''; } };
+  wrap.addEventListener('pointerup', endPan);
+  wrap.addEventListener('pointercancel', endPan);
+  wrap.addEventListener('contextmenu', e => e.preventDefault());
+  new ResizeObserver(() => { layoutStage(); render(); }).observe(wrap);
+
+  $('zIn').onclick = () => zoomStage(1.5);
+  $('zOut').onclick = () => zoomStage(1 / 1.5);
+  $('zFit').onclick = fitStage;
+  $('z100').onclick = () => zoomStage(1 / view.z);
+
+  window.addEventListener('keydown', e => {
+    if (!base || $('cropModal').classList.contains('open')) return;
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)) return;
+    if (e.code === 'Space') { stageSpace = true; e.preventDefault(); if (!pan) stage.style.cursor = 'grab'; }
+    else if (e.key === '0' && !e.ctrlKey) fitStage();
+    else if ((e.key === '+' || e.key === '=') && !e.ctrlKey) zoomStage(1.25);
+    else if (e.key === '-' && !e.ctrlKey) zoomStage(1 / 1.25);
+  });
+  window.addEventListener('keyup', e => { if (e.code === 'Space') stageSpace = false; });
 
   stage.addEventListener('dblclick', e => {
     const hit = hitTest(eventPos(e));
@@ -654,6 +745,7 @@
     const dx = r.x - baseCrop.x, dy = r.y - baseCrop.y;
     baseCrop = r;
     stage.width = r.w; stage.height = r.h;
+    view.fit = true; layoutStage();
     for (const L of layers) { L.x -= dx; L.y -= dy; } // pasted photos stay put on the background
   }, '배경 자르기');
 
@@ -906,7 +998,6 @@
     }, 'image/' + fmt, 0.92);
   };
 
-  window.addEventListener('resize', () => render());
   refreshLayers();
 })();
 </script>
