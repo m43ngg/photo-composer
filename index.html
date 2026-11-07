@@ -1,0 +1,914 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>사진 합성기</title>
+<style>
+  :root {
+    --bg: #f4f4f2; --panel: #ffffff; --ink: #1d1d1f; --muted: #6b6b70;
+    --line: #dcdcd8; --accent: #2f6fed; --accent-ink: #fff; --stage: #e6e6e2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #18181a; --panel: #232326; --ink: #ececee; --muted: #9a9aa0;
+      --line: #3a3a3e; --accent: #5b8cff; --accent-ink: #fff; --stage: #111113; }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body { background: var(--bg); color: var(--ink);
+    font: 14px/1.4 system-ui, "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+    display: grid; grid-template-rows: auto 1fr; }
+  header { display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  button, .btn { font: inherit; padding: 6px 12px; border-radius: 6px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  button:hover, .btn:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button:disabled { opacity: .4; cursor: default; }
+  .spacer { flex: 1; }
+  main { display: grid; grid-template-columns: 1fr 280px; min-height: 0; }
+  #stageWrap { position: relative; display: flex; align-items: center; justify-content: center;
+    background: var(--stage); overflow: hidden; padding: 16px; min-height: 0; }
+  #stage { max-width: 100%; max-height: 100%; box-shadow: 0 2px 12px rgba(0,0,0,.25);
+    background: repeating-conic-gradient(#ccc 0 25%, #fff 0 50%) 0 0 / 20px 20px;
+    touch-action: none; }
+  #empty { position: absolute; inset: 16px; display: flex; flex-direction: column; gap: 12px;
+    align-items: center; justify-content: center; border: 2px dashed var(--line);
+    border-radius: 12px; color: var(--muted); text-align: center; }
+  #empty.drag, #stageWrap.drag { outline: 3px dashed var(--accent); outline-offset: -8px; }
+  aside { background: var(--panel); border-left: 1px solid var(--line); overflow-y: auto;
+    padding: 12px; display: flex; flex-direction: column; gap: 14px; }
+  aside h2 { font-size: 13px; margin: 0 0 6px; color: var(--muted); font-weight: 600; }
+  #layers { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+  #layers li { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px;
+    border: 1px solid transparent; cursor: pointer; }
+  #layers li:hover { border-color: var(--line); }
+  #layers li.sel { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+  #layers img { width: 36px; height: 36px; object-fit: cover; border-radius: 4px; background: #888; }
+  #layers span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row { display: flex; align-items: center; gap: 8px; margin: 6px 0; }
+  .row label { width: 64px; color: var(--muted); flex: none; }
+  .row input[type=range] { flex: 1; min-width: 0; }
+  .row output { width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  select, input[type=number] { font: inherit; padding: 4px; border-radius: 6px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  .hint { color: var(--muted); font-size: 12px; line-height: 1.6; }
+  #props[hidden] { display: none; }
+  /* crop modal */
+  #cropModal { position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+    align-items: center; justify-content: center; z-index: 10; padding: 16px; }
+  #cropModal.open { display: flex; }
+  .modalBox { background: var(--panel); border-radius: 10px; padding: 14px; display: flex;
+    flex-direction: column; gap: 10px; max-width: 100%; max-height: 100%; }
+  #cropCanvas { display: block; cursor: crosshair; touch-action: none; background: #1a1a1c; border-radius: 4px; }
+  .zoomBar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+  .zoomBar button { padding: 4px 10px; }
+  #zoomLabel { min-width: 52px; text-align: center; font-variant-numeric: tabular-nums; }
+  @media (max-width: 760px) {
+    main { grid-template-columns: 1fr; grid-template-rows: 60vh auto; }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>사진 합성기</h1>
+  <button class="primary" id="btnBase">배경 사진 열기</button>
+  <button id="btnBaseCrop" disabled>✂ 배경 자르기</button>
+  <button id="btnAdd">사진 추가</button>
+  <button id="btnShape" disabled>■ 도형 추가</button>
+  <input type="file" id="fileBase" accept="image/*" hidden>
+  <input type="file" id="fileAdd" accept="image/*" multiple hidden>
+  <span class="spacer"></span>
+  <select id="fmt" title="저장 형식">
+    <option value="png">PNG</option>
+    <option value="jpeg">JPG</option>
+  </select>
+  <button class="primary" id="btnSave" disabled>저장</button>
+</header>
+<main>
+  <div id="stageWrap">
+    <canvas id="stage" hidden></canvas>
+    <div id="empty">
+      <div style="font-size:18px">사진을 여기로 끌어다 놓으세요</div>
+      <div>첫 번째 사진은 배경이 되고, 나머지는 위에 붙여집니다.<br>Ctrl+V로 붙여넣기도 됩니다.</div>
+      <div><button class="primary" id="btnBase2">배경 사진 열기</button></div>
+    </div>
+  </div>
+  <aside>
+    <section>
+      <h2>레이어 (위가 앞)</h2>
+      <ul id="layers"></ul>
+      <div class="hint" id="noLayers">아직 붙인 사진이 없어요. “사진 추가”를 누르세요.</div>
+    </section>
+    <section id="props" hidden>
+      <h2>선택한 사진</h2>
+      <div class="grid2">
+        <button id="btnCrop">✂ 자르기</button>
+        <button id="btnFlip">↔ 좌우 반전</button>
+        <button id="btnUp">▲ 앞으로</button>
+        <button id="btnDown">▼ 뒤로</button>
+        <button id="btnDup">복제</button>
+        <button id="btnDel">삭제</button>
+      </div>
+      <div id="fillBox">
+        <div class="row"><label>채우기</label>
+          <select id="pMode" style="flex:1">
+            <option value="solid">단색</option>
+            <option value="mosaic">모자이크</option>
+            <option value="blur">흐림</option>
+          </select>
+          <input type="color" id="pFill" value="#000000" title="도형 색"></div>
+        <div class="row" id="strengthRow"><label>강도</label><input type="range" id="pStrength" min="2" max="60" value="15"><output id="oStrength"></output></div>
+      </div>
+      <div class="row"><label>크기</label><input type="range" id="pSize" min="1" max="300" value="100"><output id="oSize"></output></div>
+      <div class="row"><label>회전</label><input type="range" id="pRot" min="-180" max="180" value="0"><output id="oRot"></output></div>
+      <div class="row"><label>투명도</label><input type="range" id="pOpa" min="0" max="100" value="100"><output id="oOpa"></output></div>
+      <div class="row"><label>모양</label>
+        <select id="pShape" style="flex:1">
+          <option value="rect">사각형</option>
+          <option value="round">둥근 사각형</option>
+          <option value="ellipse">원 / 타원</option>
+        </select></div>
+      <div class="row"><label>테두리</label><input type="range" id="pBorder" min="0" max="40" value="0"><output id="oBorder"></output>
+        <input type="color" id="pBorderColor" value="#ffffff" title="테두리 색"></div>
+      <div class="row"><label>그림자</label><input type="checkbox" id="pShadow"></div>
+    </section>
+    <section class="hint">
+      <h2>사용법</h2>
+      • 사진을 드래그해서 이동<br>
+      • 모서리 □ 를 끌어 크기 조절<br>
+      • 위쪽 ○ 를 끌어 회전 (Shift: 15° 단위)<br>
+      • 마우스 휠로 크기 조절<br>
+      • 방향키로 미세 이동 (Shift: 10px)<br>
+      • Delete 키로 삭제<br>
+      • 더블클릭하면 자르기 창이 열려요<br>
+      • 도형은 모서리를 끌면 가로·세로를 따로 조절해요 (Shift: 비율 유지)<br>
+      • 닉네임 가리기: 도형 추가 → 단색 / 모자이크 / 흐림
+    </section>
+  </aside>
+</main>
+
+<div id="cropModal">
+  <div class="modalBox">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <strong id="cropTitle">자르기</strong>
+      <span class="hint">원하는 부분을 드래그해서 선택하세요. 선택 영역 안을 끌면 이동합니다.</span>
+      <span class="spacer"></span>
+      <span class="hint" id="cropSize"></span>
+      <select id="cropRatio" title="비율">
+        <option value="0">자유 비율</option>
+        <option value="1">1:1</option>
+        <option value="1.3333">4:3</option>
+        <option value="0.75">3:4</option>
+        <option value="1.7778">16:9</option>
+      </select>
+    </div>
+    <canvas id="cropCanvas"></canvas>
+    <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap;align-items:center">
+      <div class="zoomBar">
+        <button id="zoomOut" title="축소">－</button>
+        <span id="zoomLabel">100%</span>
+        <button id="zoomIn" title="확대">＋</button>
+        <button id="zoomFit">전체 보기</button>
+        <button id="zoomSel">선택 영역 확대</button>
+        <span class="hint">휠: 확대 · 스페이스/우클릭 드래그: 화면 이동 · 방향키: 1px 이동</span>
+      </div>
+      <span class="spacer"></span>
+      <button id="cropAll">전체 선택</button>
+      <button id="cropCancel">취소</button>
+      <button class="primary" id="cropOk">적용</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const stage = $('stage'), ctx = stage.getContext('2d');
+  const wrap = $('stageWrap'), empty = $('empty');
+
+  let base = null;          // HTMLImageElement
+  let baseCrop = null;      // {x,y,w,h} region of base shown on stage
+  let layers = [];          // index 0 = bottom
+  let sel = null;           // selected layer
+  let drag = null;
+  let uid = 1;
+
+  // ---------- loading ----------
+  function loadImage(file) {
+    return new Promise((res, rej) => {
+      const url = URL.createObjectURL(file);
+      const img = new Image();
+      img.onload = () => res(img);
+      img.onerror = rej;
+      img.src = url;
+    });
+  }
+
+  function setBase(img) {
+    base = img;
+    baseCrop = { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight };
+    stage.width = img.naturalWidth;
+    stage.height = img.naturalHeight;
+    stage.hidden = false;
+    empty.style.display = 'none';
+    $('btnSave').disabled = $('btnBaseCrop').disabled = $('btnShape').disabled = false;
+    render();
+  }
+
+  function addShape() {
+    if (!base) return;
+    const W = stage.width, H = stage.height, off = (layers.length % 6) * W * 0.03;
+    const n = layers.filter(L => L.type === 'shape').length + 1;
+    const L = { id: uid++, type: 'shape', name: '도형 ' + n,
+      x: W / 2 + off, y: H / 2 + off, w: W * 0.2, h: Math.max(20, W * 0.05), rot: 0, opacity: 1,
+      shape: 'rect', fill: '#000000', mode: 'solid', strength: 15,
+      border: 0, borderColor: '#ffffff', shadow: false, flip: false };
+    layers.push(L);
+    select(L);
+  }
+  $('btnShape').onclick = addShape;
+
+  function addLayer(img, name) {
+    if (!base) { setBase(img); return; }
+    const W = stage.width, H = stage.height;
+    const crop = { x: 0, y: 0, w: img.naturalWidth, h: img.naturalHeight };
+    let w = Math.min(W * 0.35, img.naturalWidth);
+    if (w * crop.h / crop.w > H * 0.5) w = H * 0.5 * crop.w / crop.h;
+    const off = (layers.length % 6) * W * 0.03;
+    const L = { id: uid++, type: 'image', img, name: name || ('사진 ' + uid), crop,
+      x: W / 2 + off, y: H / 2 + off, w, rot: 0, opacity: 1, flip: false,
+      shape: 'rect', border: 0, borderColor: '#ffffff', shadow: false };
+    layers.push(L);
+    select(L);
+  }
+
+  async function handleFiles(files, asBase) {
+    const list = [...files].filter(f => f.type.startsWith('image/'));
+    for (let i = 0; i < list.length; i++) {
+      try {
+        const img = await loadImage(list[i]);
+        if (asBase && i === 0) setBase(img);
+        else addLayer(img, list[i].name.replace(/\.[^.]+$/, ''));
+      } catch (e) { alert('이미지를 열 수 없어요: ' + list[i].name); }
+    }
+  }
+
+  $('btnBase').onclick = $('btnBase2').onclick = () => $('fileBase').click();
+  $('btnAdd').onclick = () => $('fileAdd').click();
+  $('fileBase').onchange = e => { handleFiles(e.target.files, true); e.target.value = ''; };
+  $('fileAdd').onchange = e => { handleFiles(e.target.files, false); e.target.value = ''; };
+
+  ['dragenter', 'dragover'].forEach(t => wrap.addEventListener(t, e => {
+    e.preventDefault(); wrap.classList.add('drag');
+  }));
+  ['dragleave', 'drop'].forEach(t => wrap.addEventListener(t, e => {
+    e.preventDefault(); wrap.classList.remove('drag');
+  }));
+  wrap.addEventListener('drop', e => handleFiles(e.dataTransfer.files, !base));
+
+  window.addEventListener('paste', e => {
+    const files = [...e.clipboardData.items].filter(i => i.type.startsWith('image/')).map(i => i.getAsFile());
+    if (files.length) handleFiles(files, !base);
+  });
+
+  // ---------- geometry ----------
+  const isShape = L => L.type === 'shape';
+  const hOf = L => isShape(L) ? L.h : L.w * L.crop.h / L.crop.w;
+  function scaleLayer(L, f) {
+    const nw = Math.max(10, L.w * f);
+    if (isShape(L)) L.h = Math.max(4, L.h * nw / L.w);
+    L.w = nw;
+  }
+  const pxScale = () => stage.width / stage.getBoundingClientRect().width; // image px per screen px
+
+  function toLocal(L, px, py) {
+    const dx = px - L.x, dy = py - L.y, c = Math.cos(L.rot), s = Math.sin(L.rot);
+    return { x: dx * c + dy * s, y: -dx * s + dy * c };
+  }
+  function toWorld(L, lx, ly) {
+    const c = Math.cos(L.rot), s = Math.sin(L.rot);
+    return { x: L.x + lx * c - ly * s, y: L.y + lx * s + ly * c };
+  }
+  function eventPos(e) {
+    const r = stage.getBoundingClientRect();
+    return { x: (e.clientX - r.left) * stage.width / r.width,
+             y: (e.clientY - r.top) * stage.height / r.height };
+  }
+
+  function handles(L) {
+    const w2 = L.w / 2, h2 = hOf(L) / 2, k = pxScale();
+    return {
+      corners: [[-w2, -h2], [w2, -h2], [w2, h2], [-w2, h2]],
+      rot: [0, -h2 - 28 * k],
+      size: 9 * k
+    };
+  }
+
+  function hitTest(p) {
+    if (sel) {
+      const H = handles(sel), lp = toLocal(sel, p.x, p.y), r = H.size * 1.4;
+      if (Math.hypot(lp.x - H.rot[0], lp.y - H.rot[1]) <= r) return { L: sel, type: 'rotate' };
+      for (const [cx, cy] of H.corners)
+        if (Math.abs(lp.x - cx) <= r && Math.abs(lp.y - cy) <= r) return { L: sel, type: 'resize' };
+    }
+    for (let i = layers.length - 1; i >= 0; i--) {
+      const L = layers[i], lp = toLocal(L, p.x, p.y);
+      if (Math.abs(lp.x) <= L.w / 2 && Math.abs(lp.y) <= hOf(L) / 2) return { L, type: 'move' };
+    }
+    return null;
+  }
+
+  // ---------- rendering ----------
+  function shapePath(c, L, w, h, pad = 0) {
+    const W = w + pad * 2, H = h + pad * 2;
+    c.beginPath();
+    if (L.shape === 'ellipse') c.ellipse(0, 0, W / 2, H / 2, 0, 0, Math.PI * 2);
+    else if (L.shape === 'round') {
+      const r = Math.min(W, H) * 0.12 + pad;
+      c.roundRect(-W / 2, -H / 2, W, H, r);
+    } else c.rect(-W / 2, -H / 2, W, H);
+  }
+
+  // copy of what is currently under the layer's bounding box (for mosaic / blur)
+  function sampleUnder(c, L, pad) {
+    const w2 = L.w / 2, h2 = L.h / 2;
+    const pts = [[-w2, -h2], [w2, -h2], [w2, h2], [-w2, h2]].map(([a, b]) => toWorld(L, a, b));
+    const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+    const x0 = Math.max(0, Math.floor(Math.min(...xs)) - pad), y0 = Math.max(0, Math.floor(Math.min(...ys)) - pad);
+    const x1 = Math.min(c.canvas.width, Math.ceil(Math.max(...xs)) + pad);
+    const y1 = Math.min(c.canvas.height, Math.ceil(Math.max(...ys)) + pad);
+    if (x1 - x0 < 1 || y1 - y0 < 1) return null;
+    return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+  }
+
+  function drawShape(c, L) {
+    const w = L.w, h = L.h;
+    const unit = Math.max(2, Math.round(L.strength * c.canvas.width / 1000));
+    let fx = null;
+    if (L.mode !== 'solid') {
+      const pad = L.mode === 'blur' ? unit * 3 : 0;
+      const r = sampleUnder(c, L, pad);
+      if (r) {
+        const t = document.createElement('canvas'), tc = t.getContext('2d');
+        if (L.mode === 'mosaic') {
+          t.width = Math.max(1, Math.ceil(r.w / unit)); t.height = Math.max(1, Math.ceil(r.h / unit));
+          tc.drawImage(c.canvas, r.x, r.y, r.w, r.h, 0, 0, t.width, t.height);
+        } else {
+          t.width = r.w; t.height = r.h;
+          tc.drawImage(c.canvas, r.x, r.y, r.w, r.h, 0, 0, r.w, r.h);
+        }
+        fx = { t, r };
+      }
+    }
+    c.save();
+    c.translate(L.x, L.y);
+    c.rotate(L.rot);
+    c.globalAlpha = L.opacity;
+    if (L.shadow || L.border > 0) {
+      c.save();
+      if (L.shadow) {
+        c.shadowColor = 'rgba(0,0,0,.45)';
+        c.shadowBlur = Math.max(w, h) * 0.06;
+        c.shadowOffsetY = Math.max(w, h) * 0.02;
+      }
+      shapePath(c, L, w, h, L.border);
+      c.fillStyle = L.border > 0 ? L.borderColor : (L.mode === 'solid' ? L.fill : '#000');
+      c.fill();
+      c.restore();
+    }
+    shapePath(c, L, w, h);
+    if (L.mode === 'solid' || !fx) {
+      c.fillStyle = L.fill;
+      c.fill();
+    } else {
+      c.clip();
+      c.setTransform(1, 0, 0, 1, 0, 0);
+      const { t, r } = fx;
+      if (L.mode === 'mosaic') {
+        c.imageSmoothingEnabled = false;
+        c.drawImage(t, 0, 0, t.width, t.height, r.x, r.y, t.width * unit, t.height * unit);
+      } else {
+        c.filter = `blur(${unit}px)`;
+        c.drawImage(t, r.x, r.y);
+      }
+    }
+    c.restore();
+  }
+
+  function drawLayer(c, L) {
+    if (isShape(L)) return drawShape(c, L);
+    const w = L.w, h = hOf(L);
+    c.save();
+    c.translate(L.x, L.y);
+    c.rotate(L.rot);
+    c.globalAlpha = L.opacity;
+    if (L.shadow || L.border > 0) {
+      c.save();
+      if (L.shadow) {
+        c.shadowColor = 'rgba(0,0,0,.45)';
+        c.shadowBlur = Math.max(w, h) * 0.06;
+        c.shadowOffsetY = Math.max(w, h) * 0.02;
+      }
+      shapePath(c, L, w, h, L.border);
+      c.fillStyle = L.border > 0 ? L.borderColor : '#000';
+      c.fill();
+      c.restore();
+    }
+    shapePath(c, L, w, h);
+    c.clip();
+    if (L.flip) c.scale(-1, 1);
+    c.drawImage(L.img, L.crop.x, L.crop.y, L.crop.w, L.crop.h, -w / 2, -h / 2, w, h);
+    c.restore();
+  }
+
+  function render(withUI = true) {
+    if (!base) return;
+    ctx.clearRect(0, 0, stage.width, stage.height);
+    const b = baseCrop;
+    ctx.drawImage(base, b.x, b.y, b.w, b.h, 0, 0, b.w, b.h);
+    for (const L of layers) drawLayer(ctx, L);
+    if (withUI && sel) drawSelection(sel);
+  }
+
+  function drawSelection(L) {
+    const H = handles(L), k = pxScale(), h2 = hOf(L) / 2;
+    ctx.save();
+    ctx.translate(L.x, L.y);
+    ctx.rotate(L.rot);
+    ctx.lineWidth = 1.5 * k;
+    ctx.strokeStyle = '#2f6fed';
+    ctx.setLineDash([6 * k, 4 * k]);
+    ctx.strokeRect(-L.w / 2, -h2, L.w, h2 * 2);
+    ctx.setLineDash([]);
+    ctx.beginPath(); ctx.moveTo(0, -h2); ctx.lineTo(H.rot[0], H.rot[1]); ctx.stroke();
+    ctx.fillStyle = '#fff';
+    for (const [cx, cy] of H.corners) {
+      ctx.fillRect(cx - H.size / 2, cy - H.size / 2, H.size, H.size);
+      ctx.strokeRect(cx - H.size / 2, cy - H.size / 2, H.size, H.size);
+    }
+    ctx.beginPath(); ctx.arc(H.rot[0], H.rot[1], H.size * 0.65, 0, Math.PI * 2);
+    ctx.fill(); ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---------- pointer interaction ----------
+  stage.addEventListener('pointerdown', e => {
+    const p = eventPos(e), hit = hitTest(p);
+    if (!hit) { select(null); return; }
+    if (hit.L !== sel) select(hit.L);
+    const L = hit.L;
+    drag = { type: hit.type, L, start: p, ox: L.x, oy: L.y };
+    stage.setPointerCapture(e.pointerId);
+  });
+
+  stage.addEventListener('pointermove', e => {
+    const p = eventPos(e);
+    if (!drag) {
+      const hit = hitTest(p);
+      stage.style.cursor = !hit ? 'default' : hit.type === 'move' ? 'move'
+        : hit.type === 'rotate' ? 'grab' : 'nwse-resize';
+      return;
+    }
+    const L = drag.L;
+    if (drag.type === 'move') {
+      L.x = drag.ox + p.x - drag.start.x;
+      L.y = drag.oy + p.y - drag.start.y;
+    } else if (drag.type === 'resize') {
+      const lp = toLocal(L, p.x, p.y);
+      if (isShape(L) && !e.shiftKey) {
+        L.w = Math.max(4, 2 * Math.abs(lp.x));
+        L.h = Math.max(4, 2 * Math.abs(lp.y));
+      } else {
+        const aspect = L.w / hOf(L);
+        scaleLayer(L, Math.max(10, 2 * Math.max(Math.abs(lp.x), Math.abs(lp.y) * aspect)) / L.w);
+      }
+    } else if (drag.type === 'rotate') {
+      let a = Math.atan2(p.y - L.y, p.x - L.x) + Math.PI / 2;
+      if (e.shiftKey) a = Math.round(a / (Math.PI / 12)) * (Math.PI / 12);
+      L.rot = normAngle(a);
+    }
+    syncProps(); render();
+  });
+
+  const endDrag = () => { drag = null; };
+  stage.addEventListener('pointerup', endDrag);
+  stage.addEventListener('pointercancel', endDrag);
+
+  stage.addEventListener('wheel', e => {
+    if (!sel) return;
+    e.preventDefault();
+    scaleLayer(sel, e.deltaY < 0 ? 1.06 : 1 / 1.06);
+    syncProps(); render();
+  }, { passive: false });
+
+  stage.addEventListener('dblclick', e => {
+    const hit = hitTest(eventPos(e));
+    if (hit && hit.type === 'move' && !isShape(hit.L)) openLayerCrop(hit.L);
+  });
+
+  window.addEventListener('keydown', e => {
+    if (!sel || $('cropModal').classList.contains('open')) return;
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement.tagName)
+        && document.activeElement.type !== 'range') return;
+    const step = e.shiftKey ? 10 : 1;
+    const moves = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] };
+    if (moves[e.key]) { sel.x += moves[e.key][0]; sel.y += moves[e.key][1]; e.preventDefault(); render(); }
+    else if (e.key === 'Delete' || e.key === 'Backspace') { removeSel(); e.preventDefault(); }
+    else if (e.key === 'Escape') select(null);
+  });
+
+  const normAngle = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+  // ---------- layers panel ----------
+  function select(L) {
+    sel = L;
+    refreshLayers(); syncProps(); render();
+  }
+
+  function refreshLayers() {
+    const ul = $('layers');
+    ul.innerHTML = '';
+    $('noLayers').style.display = layers.length ? 'none' : '';
+    [...layers].reverse().forEach(L => {
+      const li = document.createElement('li');
+      if (L === sel) li.className = 'sel';
+      const th = document.createElement('img');
+      th.src = thumb(L);
+      const sp = document.createElement('span');
+      sp.textContent = L.name;
+      li.append(th, sp);
+      li.onclick = () => select(L);
+      ul.append(li);
+    });
+    $('props').hidden = !sel;
+  }
+
+  function thumb(L) {
+    const c = document.createElement('canvas'); c.width = c.height = 72;
+    const x = c.getContext('2d');
+    if (isShape(L)) {
+      if (L.mode === 'solid') { x.fillStyle = L.fill; x.fillRect(0, 0, 72, 72); }
+      else for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++) {
+        const v = 110 + ((i * 7 + j * 13) % 5) * 25;
+        x.fillStyle = `rgb(${v},${v},${v})`; x.fillRect(i * 12, j * 12, 12, 12);
+      }
+      return c.toDataURL();
+    }
+    const s = Math.max(72 / L.crop.w, 72 / L.crop.h);
+    const w = L.crop.w * s, h = L.crop.h * s;
+    x.drawImage(L.img, L.crop.x, L.crop.y, L.crop.w, L.crop.h, (72 - w) / 2, (72 - h) / 2, w, h);
+    return c.toDataURL();
+  }
+
+  function removeSel() {
+    if (!sel) return;
+    layers = layers.filter(L => L !== sel);
+    select(null);
+  }
+
+  function move(dir) {
+    const i = layers.indexOf(sel), j = i + dir;
+    if (i < 0 || j < 0 || j >= layers.length) return;
+    [layers[i], layers[j]] = [layers[j], layers[i]];
+    refreshLayers(); render();
+  }
+
+  $('btnDel').onclick = removeSel;
+  $('btnUp').onclick = () => move(1);
+  $('btnDown').onclick = () => move(-1);
+  $('btnFlip').onclick = () => { sel.flip = !sel.flip; render(); };
+  $('btnDup').onclick = () => {
+    const k = stage.width * 0.02;
+    const C = { ...sel, crop: sel.crop && { ...sel.crop }, id: uid++, x: sel.x + k, y: sel.y + k, name: sel.name + ' 복사' };
+    layers.splice(layers.indexOf(sel) + 1, 0, C);
+    select(C);
+  };
+  $('btnCrop').onclick = () => openLayerCrop(sel);
+
+  // ---------- property controls ----------
+  function syncProps() {
+    if (!sel) return;
+    const pct = Math.round(sel.w / stage.width * 100);
+    $('pSize').value = pct; $('oSize').textContent = pct + '%';
+    const deg = Math.round(sel.rot * 180 / Math.PI);
+    $('pRot').value = deg; $('oRot').textContent = deg + '°';
+    const op = Math.round(sel.opacity * 100);
+    $('pOpa').value = op; $('oOpa').textContent = op + '%';
+    $('pShape').value = sel.shape;
+    $('pBorder').value = sel.border; $('oBorder').textContent = sel.border;
+    $('pBorderColor').value = sel.borderColor;
+    $('pShadow').checked = sel.shadow;
+    const shp = isShape(sel);
+    $('fillBox').hidden = !shp;
+    $('btnCrop').disabled = $('btnFlip').disabled = shp;
+    if (shp) {
+      $('pMode').value = sel.mode; $('pFill').value = sel.fill;
+      $('pFill').style.display = sel.mode === 'solid' ? '' : 'none';
+      $('strengthRow').style.display = sel.mode === 'solid' ? 'none' : '';
+      $('pStrength').value = sel.strength; $('oStrength').textContent = sel.strength;
+    }
+  }
+
+  $('pSize').oninput = e => { scaleLayer(sel, Math.max(10, stage.width * e.target.value / 100) / sel.w); syncProps(); render(); };
+  $('pMode').onchange = e => { sel.mode = e.target.value; syncProps(); refreshLayers(); render(); };
+  $('pFill').oninput = e => { sel.fill = e.target.value; refreshLayers(); render(); };
+  $('pStrength').oninput = e => { sel.strength = +e.target.value; syncProps(); render(); };
+  $('pRot').oninput = e => { sel.rot = e.target.value * Math.PI / 180; syncProps(); render(); };
+  $('pOpa').oninput = e => { sel.opacity = e.target.value / 100; syncProps(); render(); };
+  $('pShape').onchange = e => { sel.shape = e.target.value; render(); };
+  $('pBorder').oninput = e => { sel.border = +e.target.value; syncProps(); render(); };
+  $('pBorderColor').oninput = e => { sel.borderColor = e.target.value; render(); };
+  $('pShadow').onchange = e => { sel.shadow = e.target.checked; render(); };
+
+  // ---------- crop dialog ----------
+  const cc = $('cropCanvas'), cx = cc.getContext('2d');
+  let crop = null; // {img, rect, drag, apply, v:{s,ox,oy,min}}
+  let spaceDown = false;
+  const dpr = () => window.devicePixelRatio || 1;
+  const imgW = () => crop.img.naturalWidth, imgH = () => crop.img.naturalHeight;
+  const cropOpen = () => $('cropModal').classList.contains('open');
+
+  function openCrop(img, rect, apply, title) {
+    crop = { img, rect: { ...rect }, drag: null, apply };
+    $('cropTitle').textContent = title;
+    $('cropRatio').value = '0';
+    $('cropModal').classList.add('open');
+    sizeCropCanvas();
+    fitView();
+    drawCrop();
+  }
+
+  function openLayerCrop(L) {
+    openCrop(L.img, L.crop, r => {
+      const scale = L.w / L.crop.w; // keep same size per source pixel
+      L.crop = r;
+      L.w = Math.max(10, r.w * scale);
+    }, '사진 자르기');
+  }
+
+  $('btnBaseCrop').onclick = () => openCrop(base, baseCrop, r => {
+    const dx = r.x - baseCrop.x, dy = r.y - baseCrop.y;
+    baseCrop = r;
+    stage.width = r.w; stage.height = r.h;
+    for (const L of layers) { L.x -= dx; L.y -= dy; } // pasted photos stay put on the background
+  }, '배경 자르기');
+
+  // canvas is a fixed-size viewport; the image is drawn into it with zoom (s) and pan (ox, oy)
+  function sizeCropCanvas() {
+    const iw = imgW(), ih = imgH();
+    const maxW = Math.min(window.innerWidth * 0.92, 1400) - 28, maxH = window.innerHeight * 0.72;
+    const f = Math.min(maxW / iw, maxH / ih);
+    const w = Math.max(240, Math.round(iw * f)), h = Math.max(160, Math.round(ih * f));
+    cc.style.width = w + 'px'; cc.style.height = h + 'px';
+    cc.width = Math.round(w * dpr()); cc.height = Math.round(h * dpr());
+  }
+
+  function fitView() {
+    const s = Math.min(cc.width / imgW(), cc.height / imgH());
+    crop.v = { s, min: s, ox: 0, oy: 0 };
+    clampView();
+  }
+
+  function clampView() {
+    const v = crop.v, w = imgW() * v.s, h = imgH() * v.s;
+    v.ox = w <= cc.width ? (cc.width - w) / 2 : Math.min(0, Math.max(cc.width - w, v.ox));
+    v.oy = h <= cc.height ? (cc.height - h) / 2 : Math.min(0, Math.max(cc.height - h, v.oy));
+    $('zoomLabel').textContent = Math.round(v.s / v.min * 100) + '%';
+  }
+
+  function zoomAt(f, px, py) { // px, py in canvas pixels
+    const v = crop.v;
+    if (px === undefined) { px = cc.width / 2; py = cc.height / 2; }
+    const ns = Math.min(v.min * 40, Math.max(v.min, v.s * f));
+    v.ox = px - (px - v.ox) * ns / v.s;
+    v.oy = py - (py - v.oy) * ns / v.s;
+    v.s = ns;
+    clampView(); drawCrop();
+  }
+
+  function zoomToSelection() {
+    const r = crop.rect, v = crop.v;
+    v.s = Math.min(v.min * 40, Math.max(v.min, Math.min(cc.width / r.w, cc.height / r.h) * 0.8));
+    v.ox = cc.width / 2 - (r.x + r.w / 2) * v.s;
+    v.oy = cc.height / 2 - (r.y + r.h / 2) * v.s;
+    clampView(); drawCrop();
+  }
+
+  function canvasPx(e) {
+    const b = cc.getBoundingClientRect();
+    return { x: (e.clientX - b.left) * cc.width / b.width, y: (e.clientY - b.top) * cc.height / b.height };
+  }
+  function cropPos(e) {
+    const p = canvasPx(e), v = crop.v;
+    return { x: Math.min(imgW(), Math.max(0, (p.x - v.ox) / v.s)),
+             y: Math.min(imgH(), Math.max(0, (p.y - v.oy) / v.s)) };
+  }
+
+  function cropHandles(r) {
+    const xs = [r.x, r.x + r.w / 2, r.x + r.w], ys = [r.y, r.y + r.h / 2, r.y + r.h];
+    return [['nw', 0, 0], ['n', 1, 0], ['ne', 2, 0], ['e', 2, 1], ['se', 2, 2], ['s', 1, 2], ['sw', 0, 2], ['w', 0, 1]]
+      .map(([id, i, j]) => ({ id, x: xs[i], y: ys[j] }));
+  }
+  function hitHandle(p) {
+    const tol = 9 * dpr() / crop.v.s, ratio = +$('cropRatio').value;
+    for (const h of cropHandles(crop.rect)) {
+      if (ratio && h.id.length === 1) continue; // fixed ratio: corners only
+      if (Math.abs(p.x - h.x) <= tol && Math.abs(p.y - h.y) <= tol) return h.id;
+    }
+    return null;
+  }
+  const handleCursor = { nw: 'nwse-resize', se: 'nwse-resize', ne: 'nesw-resize', sw: 'nesw-resize',
+    n: 'ns-resize', s: 'ns-resize', e: 'ew-resize', w: 'ew-resize' };
+  const isFull = r => r.x === 0 && r.y === 0 && r.w === imgW() && r.h === imgH();
+  const inRect = (p, r) => p.x > r.x && p.x < r.x + r.w && p.y > r.y && p.y < r.y + r.h;
+
+  function drawCrop() {
+    const { img, rect: r, v } = crop, k = dpr() / v.s; // k = one screen px in image px
+    cx.setTransform(1, 0, 0, 1, 0, 0);
+    cx.clearRect(0, 0, cc.width, cc.height);
+    cx.setTransform(v.s, 0, 0, v.s, v.ox, v.oy);
+    cx.imageSmoothingEnabled = v.s < 3; // show crisp pixels when zoomed far in
+    cx.drawImage(img, 0, 0);
+    cx.fillStyle = 'rgba(0,0,0,.55)';
+    cx.beginPath();
+    cx.rect(0, 0, imgW(), imgH());
+    cx.rect(r.x, r.y, r.w, r.h);
+    cx.fill('evenodd');
+    cx.lineWidth = 1 * k; cx.strokeStyle = 'rgba(255,255,255,.45)';
+    cx.beginPath();
+    for (let i = 1; i < 3; i++) {
+      cx.moveTo(r.x + r.w * i / 3, r.y); cx.lineTo(r.x + r.w * i / 3, r.y + r.h);
+      cx.moveTo(r.x, r.y + r.h * i / 3); cx.lineTo(r.x + r.w, r.y + r.h * i / 3);
+    }
+    cx.stroke();
+    cx.lineWidth = 1.5 * k; cx.strokeStyle = '#fff';
+    cx.strokeRect(r.x, r.y, r.w, r.h);
+    const hs = 8 * k, ratio = +$('cropRatio').value;
+    cx.fillStyle = '#fff'; cx.strokeStyle = '#2f6fed'; cx.lineWidth = 1.5 * k;
+    for (const h of cropHandles(r)) {
+      if (ratio && h.id.length === 1) continue;
+      cx.fillRect(h.x - hs / 2, h.y - hs / 2, hs, hs);
+      cx.strokeRect(h.x - hs / 2, h.y - hs / 2, hs, hs);
+    }
+    $('cropSize').textContent = `${Math.round(r.w)} × ${Math.round(r.h)}`;
+  }
+
+  cc.addEventListener('contextmenu', e => e.preventDefault());
+
+  cc.addEventListener('pointerdown', e => {
+    cc.setPointerCapture(e.pointerId);
+    if (e.button === 1 || e.button === 2 || spaceDown) {
+      e.preventDefault();
+      crop.drag = { type: 'pan', start: canvasPx(e), ox: crop.v.ox, oy: crop.v.oy };
+      cc.style.cursor = 'grabbing';
+      return;
+    }
+    if (e.button !== 0) return;
+    const p = cropPos(e), r = crop.rect, h = hitHandle(p);
+    const prev = { ...r };
+    if (h && h.length === 2) { // corner: redraw from the opposite corner
+      const start = { x: h.includes('w') ? r.x + r.w : r.x, y: h.includes('n') ? r.y + r.h : r.y };
+      crop.drag = { type: 'new', start, prev };
+    } else if (h) {
+      crop.drag = { type: 'edge', h, r0: prev, prev };
+    } else if (inRect(p, r) && !isFull(r)) {
+      crop.drag = { type: 'move', start: p, ox: r.x, oy: r.y, prev };
+    } else {
+      crop.drag = { type: 'new', start: p, prev };
+    }
+  });
+
+  cc.addEventListener('pointermove', e => {
+    const d = crop && crop.drag;
+    if (!crop) return;
+    if (!d) {
+      if (spaceDown) { cc.style.cursor = 'grab'; return; }
+      const p = cropPos(e), h = hitHandle(p);
+      cc.style.cursor = h ? handleCursor[h] : inRect(p, crop.rect) && !isFull(crop.rect) ? 'move' : 'crosshair';
+      return;
+    }
+    if (d.type === 'pan') {
+      const p = canvasPx(e);
+      crop.v.ox = d.ox + p.x - d.start.x;
+      crop.v.oy = d.oy + p.y - d.start.y;
+      clampView(); drawCrop();
+      return;
+    }
+    const p = cropPos(e), r = crop.rect, W = imgW(), H = imgH();
+    if (d.type === 'move') {
+      r.x = Math.min(W - r.w, Math.max(0, d.ox + p.x - d.start.x));
+      r.y = Math.min(H - r.h, Math.max(0, d.oy + p.y - d.start.y));
+    } else if (d.type === 'edge') {
+      const r0 = d.r0;
+      if (d.h === 'w' || d.h === 'e') {
+        const a = d.h === 'w' ? p.x : r0.x, b = d.h === 'e' ? p.x : r0.x + r0.w;
+        r.x = Math.min(a, b); r.w = Math.abs(b - a);
+      } else {
+        const a = d.h === 'n' ? p.y : r0.y, b = d.h === 's' ? p.y : r0.y + r0.h;
+        r.y = Math.min(a, b); r.h = Math.abs(b - a);
+      }
+    } else {
+      const ratio = +$('cropRatio').value;
+      let w = p.x - d.start.x, h = p.y - d.start.y;
+      if (ratio) {
+        const sw = Math.sign(w) || 1, sh = Math.sign(h) || 1;
+        let aw = Math.abs(w), ah = Math.abs(h);
+        if (aw / ratio > ah) ah = aw / ratio; else aw = ah * ratio;
+        const maxW = sw > 0 ? W - d.start.x : d.start.x;
+        const maxH = sh > 0 ? H - d.start.y : d.start.y;
+        const f = Math.min(1, maxW / aw, maxH / ah);
+        w = sw * aw * f; h = sh * ah * f;
+      }
+      r.x = Math.min(d.start.x, d.start.x + w); r.y = Math.min(d.start.y, d.start.y + h);
+      r.w = Math.abs(w); r.h = Math.abs(h);
+    }
+    drawCrop();
+  });
+
+  cc.addEventListener('pointerup', () => {
+    const d = crop && crop.drag;
+    if (!d) return;
+    // a click (no real drag) keeps the previous selection
+    if (d.type !== 'pan' && (crop.rect.w * crop.v.s < 4 * dpr() || crop.rect.h * crop.v.s < 4 * dpr()))
+      crop.rect = d.prev;
+    crop.drag = null;
+    cc.style.cursor = spaceDown ? 'grab' : 'crosshair';
+    drawCrop();
+  });
+
+  cc.addEventListener('wheel', e => {
+    e.preventDefault();
+    const p = canvasPx(e);
+    zoomAt(e.deltaY < 0 ? 1.2 : 1 / 1.2, p.x, p.y);
+  }, { passive: false });
+
+  window.addEventListener('keydown', e => {
+    if (!cropOpen()) return;
+    if (e.code === 'Space') { spaceDown = true; e.preventDefault(); if (!crop.drag) cc.style.cursor = 'grab'; return; }
+    if (e.key === 'Escape') { $('cropCancel').click(); return; }
+    if (e.key === 'Enter') { $('cropOk').click(); e.preventDefault(); return; }
+    const st = e.shiftKey ? 10 : 1;
+    const mv = { ArrowLeft: [-st, 0], ArrowRight: [st, 0], ArrowUp: [0, -st], ArrowDown: [0, st] }[e.key];
+    if (mv) {
+      e.preventDefault();
+      const r = crop.rect;
+      r.x = Math.min(imgW() - r.w, Math.max(0, r.x + mv[0]));
+      r.y = Math.min(imgH() - r.h, Math.max(0, r.y + mv[1]));
+      drawCrop();
+    }
+  });
+  window.addEventListener('keyup', e => {
+    if (e.code === 'Space') { spaceDown = false; if (crop && !crop.drag) cc.style.cursor = 'crosshair'; }
+  });
+  window.addEventListener('resize', () => {
+    if (!cropOpen()) return;
+    sizeCropCanvas(); fitView(); drawCrop();
+  });
+
+  $('zoomIn').onclick = () => zoomAt(1.5);
+  $('zoomOut').onclick = () => zoomAt(1 / 1.5);
+  $('zoomFit').onclick = () => { fitView(); drawCrop(); };
+  $('zoomSel').onclick = zoomToSelection;
+  $('cropRatio').onchange = drawCrop;
+
+  $('cropAll').onclick = () => { crop.rect = { x: 0, y: 0, w: imgW(), h: imgH() }; drawCrop(); };
+  $('cropCancel').onclick = () => { $('cropModal').classList.remove('open'); crop = null; spaceDown = false; };
+  $('cropOk').onclick = () => {
+    const r = crop.rect;
+    crop.apply({ x: Math.round(r.x), y: Math.round(r.y), w: Math.max(1, Math.round(r.w)), h: Math.max(1, Math.round(r.h)) });
+    $('cropModal').classList.remove('open'); crop = null; spaceDown = false;
+    refreshLayers(); syncProps(); render();
+  };
+
+  // ---------- export ----------
+  $('btnSave').onclick = () => {
+    const fmt = $('fmt').value;
+    render(false);
+    let src = stage;
+    if (fmt === 'jpeg') { // flatten transparency onto white
+      src = document.createElement('canvas');
+      src.width = stage.width; src.height = stage.height;
+      const x = src.getContext('2d');
+      x.fillStyle = '#fff'; x.fillRect(0, 0, src.width, src.height);
+      x.drawImage(stage, 0, 0);
+    }
+    src.toBlob(blob => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = '합성결과.' + (fmt === 'jpeg' ? 'jpg' : 'png');
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      render(true);
+    }, 'image/' + fmt, 0.92);
+  };
+
+  window.addEventListener('resize', () => render());
+  refreshLayers();
+})();
+</script>
+</body>
+</html>
